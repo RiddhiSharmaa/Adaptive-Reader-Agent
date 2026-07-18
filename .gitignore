@@ -1,8 +1,14 @@
 __pycache__/
 *.pyc
+*.pyo
 .env
+.env.local
 venv/
 .venv/
 chroma_db/
 *.egg-info/
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
