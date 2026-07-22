@@ -39,7 +39,7 @@ def index_knowledge_base(chunk_fn=structure_aware_chunk):
     all_chunks, all_ids, all_metadata = [], [], []
 
     for doc_path in sorted(docs_dir.glob("*.md")):
-        text = doc_path.read_text()
+        text = doc_path.read_text(encoding="utf-8")
         chunks = chunk_fn(text)
         for i, chunk in enumerate(chunks):
             all_chunks.append(chunk)
