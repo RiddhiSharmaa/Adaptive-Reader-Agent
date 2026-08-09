@@ -1,1 +1,170 @@
-{}
+{
+  "reader_01": {
+    "reader_id": "reader_01",
+    "preferences": {
+      "pacing": {
+        "value": "breakneck",
+        "personal_confidence": 0.8,
+        "peer_boost": 0.0
+      },
+      "tone": {
+        "value": "dark",
+        "personal_confidence": 0.6,
+        "peer_boost": 0.1
+      },
+      "trope": {
+        "value": "found_family",
+        "personal_confidence": 0.5,
+        "peer_boost": 0.0
+      }
+    },
+    "reading_log": [
+      {
+        "log_id": "log_001",
+        "book_id": "b001",
+        "outcome": "finished",
+        "rating": 5,
+        "dnf_reason": null,
+        "timestamp": "2026-06-10T14:00:00Z",
+        "signals_extracted": [
+          "pacing",
+          "trope"
+        ]
+      },
+      {
+        "log_id": "log_002",
+        "book_id": "b002",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow to start",
+        "timestamp": "2026-07-01T09:30:00Z",
+        "signals_extracted": [
+          "pacing"
+        ]
+      },
+      {
+        "log_id": "log_003",
+        "book_id": "b003",
+        "outcome": "finished",
+        "rating": 4,
+        "dnf_reason": null,
+        "timestamp": "2026-07-18T20:15:00Z",
+        "signals_extracted": [
+          "tone"
+        ]
+      },
+      {
+        "log_id": "log_004",
+        "book_id": "b001",
+        "outcome": "finished",
+        "rating": 5,
+        "dnf_reason": null,
+        "timestamp": "2026-08-09T05:39:34Z",
+        "signals_extracted": [
+          "pacing",
+          "tone",
+          "trope"
+        ]
+      }
+    ],
+    "signals_pending_confirmation": [
+      {
+        "signal": "prefers_standalone",
+        "source": "free_text_feedback",
+        "confidence": 0.4,
+        "temporary": true,
+        "timestamp": "2026-07-20T11:00:00Z"
+      },
+      {
+        "signal": "enjoys_breakneck_pacing",
+        "source": "log_reading_outcome",
+        "confidence": 0.5,
+        "temporary": true,
+        "timestamp": "2026-08-09T05:39:34Z"
+      }
+    ]
+  },
+  "reader_02": {
+    "reader_id": "reader_02",
+    "preferences": {
+      "pacing": {
+        "value": "measured",
+        "personal_confidence": 0.5,
+        "peer_boost": 0.05
+      },
+      "mood": {
+        "value": "hopeful",
+        "personal_confidence": 0.7,
+        "peer_boost": 0.0
+      }
+    },
+    "reading_log": [
+      {
+        "log_id": "log_004",
+        "book_id": "b004",
+        "outcome": "finished",
+        "rating": 5,
+        "dnf_reason": null,
+        "timestamp": "2026-05-22T16:45:00Z",
+        "signals_extracted": [
+          "mood"
+        ]
+      }
+    ],
+    "signals_pending_confirmation": []
+  },
+  "reader_03": {
+    "reader_id": "reader_03",
+    "preferences": {
+      "pacing": {
+        "value": "moderate",
+        "personal_confidence": 0.66,
+        "peer_boost": 0.12
+      },
+      "tone": {
+        "value": "humorous",
+        "personal_confidence": 0.74,
+        "peer_boost": 0.05
+      },
+      "trope": {
+        "value": "rivals_forced_together",
+        "personal_confidence": 0.82,
+        "peer_boost": 0.07
+      }
+    },
+    "reading_log": [
+      {
+        "log_id": "log_005",
+        "book_id": "b030",
+        "outcome": "finished",
+        "rating": 4,
+        "dnf_reason": null,
+        "timestamp": "2026-06-02T20:00:00Z",
+        "signals_extracted": [
+          "trope"
+        ]
+      },
+      {
+        "log_id": "log_006",
+        "book_id": "b032",
+        "outcome": "finished",
+        "rating": 5,
+        "dnf_reason": null,
+        "timestamp": "2026-07-15T21:10:00Z",
+        "signals_extracted": [
+          "tone",
+          "trope"
+        ]
+      }
+    ],
+    "signals_pending_confirmation": [
+      {
+        "signal": "prefers_series",
+        "source": "recommendation_feedback",
+        "confidence": 0.52,
+        "temporary": true,
+        "timestamp": "2026-07-25T08:30:00Z"
+      }
+    ]
+  }
+}
