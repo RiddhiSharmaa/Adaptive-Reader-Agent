@@ -16,7 +16,7 @@ import json
 import os
 from anthropic import Anthropic
 
-from app.tools import find_book_by_title, log_book
+from app.tools import search_books, log_book
 from app.reader_modeling import process_feedback_signal
 
 client = Anthropic(
@@ -69,10 +69,8 @@ Respond ONLY with the JSON object, no other text.
         raw_text = raw_text.strip()
     try:
         parsed = json.loads(raw_text)
-        print(f"[log_outcome DEBUG] parsed outcome: {parsed}")
         return parsed
     except (json.JSONDecodeError, IndexError) as e:
-        print(f"[log_outcome DEBUG] Failed to parse. Raw model output was:\n{raw_text!r}\nError: {e}")
         return {
             "book_title": None,
             "outcome": "finished",
@@ -83,10 +81,27 @@ Respond ONLY with the JSON object, no other text.
 
 
 def _resolve_book(book_title: str) -> dict | None:
-    """Resolve a mentioned title to a book record via fuzzy title matching."""
+    """Resolve a mentioned title to a book record via Google Books title search."""
     if not book_title:
         return None
-    return find_book_by_title(book_title)
+    
+    # Use title-specific search to get high-quality matches
+    candidates = search_books(
+        query=f'intitle:"{book_title}"',
+        max_results=5,
+    )
+    
+    if not candidates:
+        return None
+    
+    # Try for exact title match first (case-insensitive)
+    title_lower = book_title.strip().lower()
+    for book in candidates:
+        if book["title"].strip().lower() == title_lower:
+            return book
+    
+    # Fall back to first result if no exact match
+    return candidates[0]
 
 
 def handle_log_reading_outcome(state: dict) -> dict:
@@ -107,14 +122,15 @@ def handle_log_reading_outcome(state: dict) -> dict:
         }
 
     # signals_extracted: which preference dimension(s) this entry speaks to.
-    # For a DNF, that's the diagnosed dimension. For a finished book with a
-    # rating, we treat pacing/tone/trope as touched if the book's own
-    # metadata carries those tags (traceability, not a promotion).
+    # For a DNF, that's the diagnosed dimension.
+    # For a finished book: we log the outcome and rating, but we DON'T 
+    # guess pacing/tone/trope from Google metadata (those are reader-model 
+    # concepts, not book properties). A high rating creates a pending signal 
+    # that this reader had a positive experience — dimensions get confirmed 
+    # through conversation, not inferred from metadata.
     signals_extracted = []
     if parsed["outcome"] == "dnf" and parsed.get("dnf_dimension"):
         signals_extracted.append(parsed["dnf_dimension"])
-    elif parsed["outcome"] == "finished":
-        signals_extracted = [k for k in ["pacing", "tone", "trope"] if book.get(k)]
 
     log_entry = log_book(
         reader_id=reader_id,
@@ -125,29 +141,28 @@ def handle_log_reading_outcome(state: dict) -> dict:
         signals_extracted=signals_extracted,
     )
 
-    # Stage an observation for Reader Modeling — NOT a direct preference
-    # write. A single DNF or single high rating is one data point; it needs
-    # confidence to build and explicit confirmation before it becomes a
-    # stated preference (see docs/design/reader_profile_schema.md).
+    # Stage an observation for Reader Modeling — NOT a direct preference write.
     pending_signal = None
+    
+    # DNF: diagnose the dimension that likely caused the drop-off
     if parsed["outcome"] == "dnf" and parsed.get("dnf_dimension"):
         dimension = parsed["dnf_dimension"]
-        book_value = book.get(dimension)
-        signal_name = f"dislikes_{book_value}_{dimension}" if book_value else f"dnf_{dimension}_issue"
+        signal_name = f"dnf_due_to_{dimension}"
         pending_signal = {
             "signal_name": signal_name,
-            "confidence": 0.5,  # single data point — moderate, not high
+            "confidence": 0.5,  # single DNF — moderate confidence
             "source": "log_reading_outcome",
         }
+    
+    # Finished with high rating: record positive experience
+    # (reader confirms dimensions later through conversation or multiple books)
     elif parsed["outcome"] == "finished" and (parsed.get("rating") or 0) >= 4:
-        for dimension in ["pacing", "tone", "trope"]:
-            if book.get(dimension):
-                pending_signal = {
-                    "signal_name": f"enjoys_{book[dimension]}_{dimension}",
-                    "confidence": 0.5,
-                    "source": "log_reading_outcome",
-                }
-                break  # one signal per turn keeps this from overwhelming pending list
+        pending_signal = {
+            "signal_name": f"positive_experience_book_{book['book_id']}",
+            "confidence": 0.4,
+            "source": "log_reading_outcome",
+            "note": "Reader rated highly; actual pacing/tone/trope preferences confirmed through conversation",
+        }
 
     response_text = (
         f"Logged \"{book['title']}\" as {parsed['outcome']}"

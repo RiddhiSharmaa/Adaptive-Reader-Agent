@@ -65,6 +65,26 @@
           "tone",
           "trope"
         ]
+      },
+      {
+        "log_id": "log_005",
+        "book_id": "tZgL0AEACAAJ",
+        "outcome": "finished",
+        "rating": 5,
+        "dnf_reason": null,
+        "timestamp": "2026-08-09T20:42:08Z",
+        "signals_extracted": []
+      },
+      {
+        "log_id": "log_006",
+        "book_id": "t9X0wi-0xusC",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow",
+        "timestamp": "2026-08-09T20:42:51Z",
+        "signals_extracted": [
+          "pacing"
+        ]
       }
     ],
     "signals_pending_confirmation": [
@@ -81,6 +101,20 @@
         "confidence": 0.5,
         "temporary": true,
         "timestamp": "2026-08-09T05:39:34Z"
+      },
+      {
+        "signal": "positive_experience_book_tZgL0AEACAAJ",
+        "source": "log_reading_outcome",
+        "confidence": 0.4,
+        "temporary": true,
+        "timestamp": "2026-08-09T20:42:08Z"
+      },
+      {
+        "signal": "dnf_due_to_pacing",
+        "source": "log_reading_outcome",
+        "confidence": 0.5,
+        "temporary": true,
+        "timestamp": "2026-08-09T20:42:51Z"
       }
     ]
   },

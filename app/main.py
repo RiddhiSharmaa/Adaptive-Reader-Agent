@@ -47,8 +47,8 @@ class ChatRequest(BaseModel):
 
 @app.get("/api/users")
 def users():
-    """Reader / Author personas for the UI switcher."""
-    return list(_USERS.values())
+    """Reader personas for the UI switcher (readers only, no author)."""
+    return [u for u in _USERS.values() if u.get("role") == "reader"]
 
 
 @app.post("/api/chat")
@@ -78,7 +78,6 @@ def chat(req: ChatRequest, x_user_id: str = Header(default="", alias="X-User-Id"
     return {
         "reply": result.get("response", "Something went wrong — no response was generated."),
         "intent": result.get("intent"),
-        "intent_confidence": result.get("intent_confidence"),  # TEMP: remove once classifier confirmed stable
     }
 
 

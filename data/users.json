@@ -1,4 +1,5 @@
 [
-  { "id": "reader_01", "full_name": "Riddhi (Reader)", "role": "reader" },
-  { "id": "author_01", "full_name": "Sample Author", "role": "author" }
+  { "id": "reader_01", "full_name": "Riddhi", "role": "reader" },
+  { "id": "reader_02", "full_name": "Alex", "role": "reader" },
+  { "id": "reader_03", "full_name": "Jordan", "role": "reader" }
 ]

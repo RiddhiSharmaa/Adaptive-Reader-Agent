@@ -1,25 +1,28 @@
 """
-Tool layer for the Adaptive Reader Agent.
+Tool layer for the Adaptive Reader Agent — Part 3 (Google Books API).
 
-This is the seam between the agent's reasoning (LangGraph, intent handlers)
-and where data actually lives. Every intent handler should call through
-these functions rather than touching data/reader_profiles.json directly.
+Replaces search_books(), get_book_by_id() stubs with real Google Books API calls.
+Everything else (reader profile management, log_book) stays the same.
 
-Why this matters for Part 3 / Part 4:
-- search_books() is the deliberate stub that gets swapped for a live Google
-  Books API call in Part 3. Nothing above this function should need to change.
-- get_author_stats() already takes `requesting_user` even though the real
-  authorization check isn't built until Part 4 — the seam for "enforce this
-  in code, not just in the prompt" needs to exist now, not be bolted on later.
+Normalized return shape ensures nothing upstream (planner, recommend handler)
+needs to change — Google Books metadata is mapped to a consistent dict schema.
 """
 
 import json
+import os
+import requests
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 READER_PROFILES_PATH = DATA_DIR / "reader_profiles.json"
+
+# Google Books API configuration
+GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
+GOOGLE_BOOKS_API_BASE = "https://www.googleapis.com/books/v1"
+GOOGLE_BOOKS_API_TIMEOUT = 10  # seconds
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,57 @@ def _save_profiles(profiles: dict) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _normalize_google_book(volume: dict) -> Optional[dict]:
+    """
+    Transform a Google Books volume object into our normalized shape.
+    Returns None if the volume is missing critical fields.
+
+    Normalized shape (kept consistent with Part 2 to avoid breaking upstream):
+    {
+        "book_id": str,          (Google volumeId)
+        "title": str,
+        "author": str,           (primary author, comma-separated if multiple)
+        "description": str,      (truncated if too long)
+        "categories": list,      (genre/category tags)
+        "pageCount": int,
+        "imageLink": str,        (thumbnail URL or empty string)
+        "publishedDate": str,
+        "language": str,
+    }
+
+    Note: pacing, tone, trope fields are deliberately NOT included — these
+    are invented fields specific to the reader model. They will be evaluated
+    later by comparing descriptions against the reader's preferences.
+    """
+    vol_info = volume.get("volumeInfo", {})
+    
+    # Critical fields that must exist
+    title = vol_info.get("title")
+    if not title:
+        return None
+
+    # Authors
+    authors_list = vol_info.get("authors", ["Unknown"])
+    author = ", ".join(authors_list) if authors_list else "Unknown"
+
+    # Description (may be missing or very long)
+    description = vol_info.get("description", "").strip()
+    if len(description) > 500:
+        description = description[:497] + "..."
+
+    return {
+        "book_id": volume.get("id"),
+        "title": title,
+        "author": author,
+        "description": description if description else "(No description available)",
+        "categories": vol_info.get("categories", []),
+        "pageCount": vol_info.get("pageCount", 0),
+        "imageLink": vol_info.get("imageLinks", {}).get("thumbnail", ""),
+        "publishedDate": vol_info.get("publishedDate", ""),
+        "language": vol_info.get("language", "en"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -169,100 +223,159 @@ def log_book(
 
 
 # ---------------------------------------------------------------------------
-# 4. search_books  — STUB, swapped for live Google Books API in Part 3
+# 4. search_books — LIVE Google Books API
 # ---------------------------------------------------------------------------
 
-def search_books(query: str, filters: Optional[dict] = None) -> list[dict]:
+def search_books(query: str, filters: Optional[dict] = None, max_results: int = 10) -> list[dict]:
     """
-    Search for books matching a query and optional filters
-    (e.g. {"pacing": "breakneck", "tone": "dark"}).
+    Search Google Books API for books matching a query.
 
-    STUB: returns a small hardcoded catalog for now. This is the deliberate
-    seam for Part 3 — when swapped for a real Google Books API call, the
-    return shape (list of dicts with these keys) should stay the same so
-    nothing upstream (planner, recommend handler) needs to change.
+    Args:
+        query (str): Natural-language search query (e.g. "fast-paced dark 
+                     mystery"). This is constructed by the agent to be 
+                     semantically meaningful to Google Books.
+        filters (dict): Accepted for signature compatibility, but NOT used 
+                        for filtering Google results (Google Books doesn't 
+                        have pacing/tone/trope fields). Filtering against 
+                        these happens in recommend.py after results return.
+        max_results (int): Max results to return (Google Books API supports 
+                          0-40, default 10).
+
+    Returns:
+        list[dict]: Normalized book objects, or empty list on error.
+
+    Error handling:
+        - API key missing → returns []
+        - Query empty → returns []
+        - Timeout/network error → logs and returns []
+        - HTTP errors (429, 503, etc.) → logs and returns []
+        - Malformed response → logs and returns []
     """
-    fake_catalog = [
-        {
-            "book_id": "b001",
-            "title": "The Glass Labyrinth",
-            "author": "M. Okafor",
-            "pacing": "breakneck",
-            "tone": "dark",
-            "trope": "found_family",
-            "description": "A fugitive engineer and a defected soldier race across "
-                            "a collapsing city-state to stop a coup.",
-        },
-        {
-            "book_id": "b002",
-            "title": "Winter's Ledger",
-            "author": "R. Voss",
-            "pacing": "measured",
-            "tone": "hopeful",
-            "trope": "found_family",
-            "description": "A retired accountant uncovers a decades-old fraud in "
-                            "her small mountain town.",
-        },
-        {
-            "book_id": "b003",
-            "title": "Static Bloom",
-            "author": "J. Adeyemi",
-            "pacing": "breakneck",
-            "tone": "melancholic",
-            "trope": "unreliable_narrator",
-            "description": "A signal-jamming technician starts hearing a voice "
-                            "that shouldn't be on the network.",
-        },
-    ]
+    if not GOOGLE_BOOKS_API_KEY:
+        print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
+        return []
 
-    if not filters:
-        return fake_catalog
+    if not query or not query.strip():
+        return []
 
-    def matches(book: dict) -> bool:
-        return all(book.get(k) == v for k, v in filters.items())
+    query = query.strip()
+    max_results = min(max(1, max_results), 40)  # Google API limit
 
-    return [b for b in fake_catalog if matches(b)]
+    try:
+        url = f"{GOOGLE_BOOKS_API_BASE}/volumes"
+        params = {
+            "q": query,
+            "maxResults": max_results,
+            "key": GOOGLE_BOOKS_API_KEY,
+        }
 
+        response = requests.get(
+            url,
+            params=params,
+            timeout=GOOGLE_BOOKS_API_TIMEOUT,
+        )
+
+        # Handle HTTP errors
+        if response.status_code == 429:
+            print(f"WARNING: Google Books API rate limited (429). Retry after {response.headers.get('Retry-After', 'unknown')} seconds")
+            return []
+        elif response.status_code == 503:
+            print("WARNING: Google Books API temporarily unavailable (503)")
+            return []
+        elif response.status_code != 200:
+            print(f"ERROR: Google Books API returned {response.status_code}: {response.text[:200]}")
+            return []
+
+        data = response.json()
+        items = data.get("items", [])
+
+        # Normalize and filter valid volumes
+        normalized = []
+        for volume in items:
+            normalized_vol = _normalize_google_book(volume)
+            if normalized_vol:
+                normalized.append(normalized_vol)
+
+        return normalized
+
+    except requests.Timeout:
+        print(f"ERROR: Google Books API timeout (>{GOOGLE_BOOKS_API_TIMEOUT}s)")
+        return []
+    except requests.RequestException as e:
+        print(f"ERROR: Google Books API network error: {str(e)[:200]}")
+        return []
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"ERROR: Could not parse Google Books response: {str(e)[:200]}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# 5. get_book_by_id — LIVE Google Books API (resolve mode)
+# ---------------------------------------------------------------------------
 
 def get_book_by_id(book_id: str) -> Optional[dict]:
     """
-    Resolve a single known book_id into its display metadata.
+    Resolve a single known book_id (Google volumeId) into its display metadata.
 
-    STUB: looks up against the same hardcoded fake catalog as search_books().
-    This is the "resolve" call the peer-match recommendation path uses —
-    cheaper than a discovery search since we already know exactly which
-    book we want, we just need its title/author/description to show the
-    reader. Swapped for a real Google Books "get by id" call in Part 3.
+    Used by the "resolve" path in recommend.py when a peer match was already
+    found — cheaper than a discovery search since we already know exactly
+    which book we want, we just need its title/author/description to show
+    the reader.
+
+    Returns:
+        dict: Normalized book object, or None if not found or API error.
+
+    Error handling:
+        - API key missing → returns None
+        - book_id empty/None → returns None
+        - 404 (book not found) → returns None
+        - Timeout/network error → logs and returns None
     """
-    for book in search_books(query=""):
-        if book["book_id"] == book_id:
-            return book
-    return None
-
-
-def find_book_by_title(title: str) -> Optional[dict]:
-    """
-    Resolve a reader-mentioned title (e.g. from log_reading_outcome) to a
-    book record via fuzzy, case-insensitive substring matching on title.
-
-    This is DELIBERATELY separate from search_books(): search_books's
-    `query` argument is not used for text matching (it filters purely on
-    tags like pacing/tone/trope, which is correct for discovery mode) — so
-    reusing it here would silently resolve to the wrong book regardless of
-    what title was actually mentioned. This function is Part 3's other
-    seam: swapped for a real Google Books title search when live.
-    """
-    if not title:
+    if not GOOGLE_BOOKS_API_KEY:
+        print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
         return None
-    needle = title.strip().lower()
-    for book in search_books(query=""):
-        if needle in book["title"].lower() or book["title"].lower() in needle:
-            return book
-    return None
+
+    if not book_id or not book_id.strip():
+        return None
+
+    book_id = book_id.strip()
+
+    try:
+        url = f"{GOOGLE_BOOKS_API_BASE}/volumes/{book_id}"
+        params = {"key": GOOGLE_BOOKS_API_KEY}
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=GOOGLE_BOOKS_API_TIMEOUT,
+        )
+
+        if response.status_code == 404:
+            # Book not found — this is expected, not an error to log loudly
+            return None
+        elif response.status_code == 429:
+            print("WARNING: Google Books API rate limited (429)")
+            return None
+        elif response.status_code != 200:
+            print(f"ERROR: Google Books API returned {response.status_code}")
+            return None
+
+        volume = response.json()
+        return _normalize_google_book(volume)
+
+    except requests.Timeout:
+        print(f"ERROR: Google Books API timeout for book_id={book_id}")
+        return None
+    except requests.RequestException as e:
+        print(f"ERROR: Google Books API network error for book_id={book_id}: {str(e)[:200]}")
+        return None
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"ERROR: Could not parse Google Books response for book_id={book_id}")
+        return None
 
 
 # ---------------------------------------------------------------------------
-# 5. get_author_stats — STUB, authorization enforced in Part 4
+# 6. get_author_stats — STUB, authorization enforced in Part 4
 # ---------------------------------------------------------------------------
 
 def get_author_stats(author_id: str, requesting_user: dict) -> dict:
