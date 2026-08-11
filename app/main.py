@@ -15,6 +15,14 @@ from pydantic import BaseModel
 from . import config, rag_index
 from .graph import build_graph
 
+from app.rag_index import knowledge_collection, index_knowledge_base
+
+print("Initializing RAG index...")
+docs = knowledge_collection.get()
+if not docs or len(docs.get("documents", [])) == 0:
+    print("  Indexing...")
+    index_knowledge_base()
+
 app = FastAPI(title="Adaptive Reader Agent")
 
 # Build the graph once at import time — reused across requests.

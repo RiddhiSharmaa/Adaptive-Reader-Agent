@@ -24,6 +24,9 @@ GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
 GOOGLE_BOOKS_API_BASE = "https://www.googleapis.com/books/v1"
 GOOGLE_BOOKS_API_TIMEOUT = 10  # seconds
 
+_GOOGLE_BOOKS_DEGRADED = False
+_SEARCH_CACHE = {}
+_BOOK_BY_ID_CACHE = {}
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -95,6 +98,52 @@ def _normalize_google_book(volume: dict) -> Optional[dict]:
         "language": vol_info.get("language", "en"),
     }
 
+# ---------------------------------------------------------------------------
+# Local book database fallback
+# ---------------------------------------------------------------------------
+
+_LOCAL_BOOKS_PATH = DATA_DIR / "books.json"
+
+def _load_local_books() -> list[dict]:
+    """Load local book database for fallback when Google Books API is unavailable."""
+    if not _LOCAL_BOOKS_PATH.exists():
+        return []
+    with open(_LOCAL_BOOKS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _search_local_books(query: str, max_results: int = 10) -> list[dict]:
+    """Search local database, return best matches or fallback to all books."""
+    books = _load_local_books()
+    if not books:
+        return []
+    
+    query_lower = query.lower()
+    query_words = set(query_lower.split())
+    
+    scored = []
+    for book in books:
+        title_match = sum(1 for w in query_words if w in book.get("title", "").lower())
+        desc_match = sum(1 for w in query_words if w in book.get("description", "").lower())
+        category_match = sum(1 for w in query_words if w in " ".join(book.get("categories", [])).lower())
+        
+        score = title_match * 3 + desc_match + category_match
+        scored.append((score, book))
+    
+    # Sort by score, return top matches
+    scored.sort(key=lambda x: x[0], reverse=True)
+    
+    # Return top results (even if score is 0, return something)
+    return [book for _, book in scored[:max_results]]
+
+
+def _get_local_book_by_id(book_id: str) -> Optional[dict]:
+    """Retrieve a book from local database by ID."""
+    books = _load_local_books()
+    for book in books:
+        if book.get("book_id") == book_id or book.get("id") == book_id:
+            return book
+    return None
 
 # ---------------------------------------------------------------------------
 # 1. get_reader_profile
@@ -242,15 +291,35 @@ def search_books(query: str, filters: Optional[dict] = None, max_results: int = 
                           0-40, default 10).
 
     Returns:
-        list[dict]: Normalized book objects, or empty list on error.
+        list[dict]: Normalized book objects, or empty list if no results or fallback used.
+
+    Behavior:
+        - Caches successful queries to avoid repeated API calls.
+        - Once API rate limit (429) or timeout occurs, switches to local book 
+          database fallback for remaining session.
+        - If Google Books unavailable, returns matches from local books.json.
 
     Error handling:
         - API key missing → returns []
         - Query empty → returns []
-        - Timeout/network error → logs and returns []
-        - HTTP errors (429, 503, etc.) → logs and returns []
-        - Malformed response → logs and returns []
+        - Rate limit/timeout → logs, switches to local fallback
+        - Malformed response → logs, switches to local fallback
     """
+    
+    global _GOOGLE_BOOKS_DEGRADED, _SEARCH_CACHE
+    
+    # Check cache first
+    cache_key = (query, max_results)
+    if cache_key in _SEARCH_CACHE:
+        return _SEARCH_CACHE[cache_key]
+    
+    # Skip Google Books if already rate limited
+    if _GOOGLE_BOOKS_DEGRADED:
+        print(f"[GOOGLE BOOKS DEGRADED] Using local fallback for: {query}")
+        result = _search_local_books(query, max_results)
+        _SEARCH_CACHE[cache_key] = result
+        return result
+
     if not GOOGLE_BOOKS_API_KEY:
         print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
         return []
@@ -259,7 +328,7 @@ def search_books(query: str, filters: Optional[dict] = None, max_results: int = 
         return []
 
     query = query.strip()
-    max_results = min(max(1, max_results), 40)  # Google API limit
+    max_results = min(max(1, max_results), 40)
 
     try:
         url = f"{GOOGLE_BOOKS_API_BASE}/volumes"
@@ -275,38 +344,101 @@ def search_books(query: str, filters: Optional[dict] = None, max_results: int = 
             timeout=GOOGLE_BOOKS_API_TIMEOUT,
         )
 
-        # Handle HTTP errors
         if response.status_code == 429:
-            print(f"WARNING: Google Books API rate limited (429). Retry after {response.headers.get('Retry-After', 'unknown')} seconds")
-            return []
+            print(f"WARNING: Google Books API rate limited (429)")
+            _GOOGLE_BOOKS_DEGRADED = True
+            # Fall through to local fallback
         elif response.status_code == 503:
             print("WARNING: Google Books API temporarily unavailable (503)")
-            return []
+            _GOOGLE_BOOKS_DEGRADED = True
         elif response.status_code != 200:
-            print(f"ERROR: Google Books API returned {response.status_code}: {response.text[:200]}")
-            return []
-
-        data = response.json()
-        items = data.get("items", [])
-
-        # Normalize and filter valid volumes
-        normalized = []
-        for volume in items:
-            normalized_vol = _normalize_google_book(volume)
-            if normalized_vol:
-                normalized.append(normalized_vol)
-
-        return normalized
+            print(f"ERROR: Google Books API returned {response.status_code}")
+            _GOOGLE_BOOKS_DEGRADED = True
+        else:
+            # Success — return and cache
+            data = response.json()
+            items = data.get("items", [])
+            normalized = []
+            for volume in items:
+                normalized_vol = _normalize_google_book(volume)
+                if normalized_vol:
+                    normalized.append(normalized_vol)
+            _SEARCH_CACHE[cache_key] = normalized
+            return normalized
 
     except requests.Timeout:
-        print(f"ERROR: Google Books API timeout (>{GOOGLE_BOOKS_API_TIMEOUT}s)")
-        return []
+        print(f"ERROR: Google Books API timeout")
+        _GOOGLE_BOOKS_DEGRADED = True
     except requests.RequestException as e:
-        print(f"ERROR: Google Books API network error: {str(e)[:200]}")
-        return []
+        print(f"ERROR: Google Books API network error")
+        _GOOGLE_BOOKS_DEGRADED = True
     except (json.JSONDecodeError, KeyError) as e:
-        print(f"ERROR: Could not parse Google Books response: {str(e)[:200]}")
-        return []
+        print(f"ERROR: Could not parse Google Books response")
+        _GOOGLE_BOOKS_DEGRADED = True
+    
+    # Fall back to local
+    print(f"Falling back to local database for: {query}")
+    result = _search_local_books(query, max_results)
+    _SEARCH_CACHE[cache_key] = result
+    return result
+
+    # if not GOOGLE_BOOKS_API_KEY:
+    #     print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
+    #     return []
+
+    # if not query or not query.strip():
+    #     return []
+
+    # query = query.strip()
+    # max_results = min(max(1, max_results), 40)  # Google API limit
+
+    # try:
+    #     url = f"{GOOGLE_BOOKS_API_BASE}/volumes"
+    #     params = {
+    #         "q": query,
+    #         "maxResults": max_results,
+    #         "key": GOOGLE_BOOKS_API_KEY,
+    #     }
+
+    #     response = requests.get(
+    #         url,
+    #         params=params,
+    #         timeout=GOOGLE_BOOKS_API_TIMEOUT,
+    #     )
+
+    #     # Handle HTTP errors
+    #     if response.status_code == 429:
+    #         print(f"WARNING: Google Books API rate limited (429). Retry after {response.headers.get('Retry-After', 'unknown')} seconds")
+    #         return []
+    #     elif response.status_code == 503:
+    #         print("WARNING: Google Books API temporarily unavailable (503)")
+    #         return []
+    #     elif response.status_code != 200:
+    #         print(f"ERROR: Google Books API returned {response.status_code}: {response.text[:200]}")
+    #         return []
+
+    #     data = response.json()
+    #     items = data.get("items", [])
+
+    #     # Normalize and filter valid volumes
+    #     normalized = []
+    #     for volume in items:
+    #         normalized_vol = _normalize_google_book(volume)
+    #         if normalized_vol:
+    #             normalized.append(normalized_vol)
+
+    #     return normalized
+
+    # except requests.Timeout:
+    #     print(f"ERROR: Google Books API timeout (>{GOOGLE_BOOKS_API_TIMEOUT}s)")
+    # except requests.RequestException as e:
+    #     print(f"ERROR: Google Books API network error: {str(e)[:200]}")
+    # except (json.JSONDecodeError, KeyError) as e:
+    #     print(f"ERROR: Could not parse Google Books response: {str(e)[:200]}")
+    
+    # # Fall back to local book database
+    # print(f"Falling back to local book database for query: {query}")
+    # return _search_local_books(query, max_results)
 
 
 # ---------------------------------------------------------------------------
@@ -315,24 +447,43 @@ def search_books(query: str, filters: Optional[dict] = None, max_results: int = 
 
 def get_book_by_id(book_id: str) -> Optional[dict]:
     """
-    Resolve a single known book_id (Google volumeId) into its display metadata.
+    Resolve a single known book_id into its display metadata.
 
     Used by the "resolve" path in recommend.py when a peer match was already
     found — cheaper than a discovery search since we already know exactly
-    which book we want, we just need its title/author/description to show
-    the reader.
+    which book we want, we just need its title/author/description.
+
+    Args:
+        book_id (str): Google volumeId or local book_id.
 
     Returns:
         dict: Normalized book object, or None if not found or API error.
 
+    Behavior:
+        - Caches successful lookups to avoid repeated API calls.
+        - Once API rate limit (429) or timeout occurs, switches to local book 
+          database fallback for remaining session.
+        - Checks local books.json if Google Books unavailable.
+
     Error handling:
-        - API key missing → returns None
+        - API key missing → checks local database
         - book_id empty/None → returns None
-        - 404 (book not found) → returns None
-        - Timeout/network error → logs and returns None
+        - 404 (not found) → returns None
+        - Rate limit/timeout → logs, switches to local fallback
     """
+    global _GOOGLE_BOOKS_DEGRADED, _BOOK_BY_ID_CACHE
+    
+    # Check cache first
+    if book_id in _BOOK_BY_ID_CACHE:
+        return _BOOK_BY_ID_CACHE[book_id]
+    
+    # Skip Google Books if already rate limited
+    if _GOOGLE_BOOKS_DEGRADED:
+        result = _get_local_book_by_id(book_id)
+        _BOOK_BY_ID_CACHE[book_id] = result
+        return result
+
     if not GOOGLE_BOOKS_API_KEY:
-        print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
         return None
 
     if not book_id or not book_id.strip():
@@ -351,27 +502,71 @@ def get_book_by_id(book_id: str) -> Optional[dict]:
         )
 
         if response.status_code == 404:
-            # Book not found — this is expected, not an error to log loudly
+            _BOOK_BY_ID_CACHE[book_id] = None
             return None
         elif response.status_code == 429:
             print("WARNING: Google Books API rate limited (429)")
-            return None
+            _GOOGLE_BOOKS_DEGRADED = True
         elif response.status_code != 200:
             print(f"ERROR: Google Books API returned {response.status_code}")
-            return None
+            _GOOGLE_BOOKS_DEGRADED = True
+        else:
+            # Success — cache and return
+            volume = response.json()
+            result = _normalize_google_book(volume)
+            _BOOK_BY_ID_CACHE[book_id] = result
+            return result
 
-        volume = response.json()
-        return _normalize_google_book(volume)
+    except (requests.Timeout, requests.RequestException, json.JSONDecodeError, KeyError):
+        print(f"[ERROR] Checking local database for: {book_id}")
+        _GOOGLE_BOOKS_DEGRADED = True
+    
+    # Fall back to local
+    result = _get_local_book_by_id(book_id)
+    _BOOK_BY_ID_CACHE[book_id] = result
+    return result
+    # if not GOOGLE_BOOKS_API_KEY:
+    #     print("ERROR: GOOGLE_BOOKS_API_KEY not set in environment")
+    #     return None
 
-    except requests.Timeout:
-        print(f"ERROR: Google Books API timeout for book_id={book_id}")
-        return None
-    except requests.RequestException as e:
-        print(f"ERROR: Google Books API network error for book_id={book_id}: {str(e)[:200]}")
-        return None
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"ERROR: Could not parse Google Books response for book_id={book_id}")
-        return None
+    # if not book_id or not book_id.strip():
+    #     return None
+
+    # book_id = book_id.strip()
+
+    # try:
+    #     url = f"{GOOGLE_BOOKS_API_BASE}/volumes/{book_id}"
+    #     params = {"key": GOOGLE_BOOKS_API_KEY}
+
+    #     response = requests.get(
+    #         url,
+    #         params=params,
+    #         timeout=GOOGLE_BOOKS_API_TIMEOUT,
+    #     )
+
+    #     if response.status_code == 404:
+    #         # Book not found — this is expected, not an error to log loudly
+    #         return None
+    #     elif response.status_code == 429:
+    #         print("WARNING: Google Books API rate limited (429)")
+    #         return None
+    #     elif response.status_code != 200:
+    #         print(f"ERROR: Google Books API returned {response.status_code}")
+    #         return None
+
+    #     volume = response.json()
+    #     return _normalize_google_book(volume)
+
+    # except requests.Timeout:
+    #     print(f"ERROR: Google Books API timeout for book_id={book_id}")
+    # except requests.RequestException as e:
+    #     print(f"ERROR: Google Books API network error for book_id={book_id}: {str(e)[:200]}")
+    # except (json.JSONDecodeError, KeyError) as e:
+    #     print(f"ERROR: Could not parse Google Books response for book_id={book_id}")
+    
+    # # Fall back to local book database
+    # print(f"Falling back to local book database for book_id={book_id}")
+    # return _get_local_book_by_id(book_id)
 
 
 # ---------------------------------------------------------------------------

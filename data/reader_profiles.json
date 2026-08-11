@@ -85,6 +85,48 @@
         "signals_extracted": [
           "pacing"
         ]
+      },
+      {
+        "log_id": "log_007",
+        "book_id": "CixXEAAAQBAJ",
+        "outcome": "finished",
+        "rating": 4,
+        "dnf_reason": null,
+        "timestamp": "2026-08-10T13:13:19Z",
+        "signals_extracted": []
+      },
+      {
+        "log_id": "log_008",
+        "book_id": "OlmJEAAAQBAJ",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow",
+        "timestamp": "2026-08-10T15:51:39Z",
+        "signals_extracted": [
+          "pacing"
+        ]
+      },
+      {
+        "log_id": "log_012",
+        "book_id": "5y6JEAAAQBAJ",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow",
+        "timestamp": "2026-08-10T17:59:40Z",
+        "signals_extracted": [
+          "pacing"
+        ]
+      },
+      {
+        "log_id": "log_036",
+        "book_id": "local_name_wind",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow",
+        "timestamp": "2026-08-11T06:00:58Z",
+        "signals_extracted": [
+          "pacing"
+        ]
       }
     ],
     "signals_pending_confirmation": [
@@ -114,10 +156,20 @@
         "source": "log_reading_outcome",
         "confidence": 0.5,
         "temporary": true,
-        "timestamp": "2026-08-09T20:42:51Z"
+        "evidence_count": 40,
+        "first_observed": "2026-08-09T20:42:51Z",
+        "last_observed": "2026-08-11T07:01:11Z"
+      },
+      {
+        "signal": "positive_experience_book_CixXEAAAQBAJ",
+        "source": "log_reading_outcome",
+        "confidence": 0.4,
+        "temporary": true,
+        "timestamp": "2026-08-10T13:13:19Z"
       }
     ]
   },
+
   "reader_02": {
     "reader_id": "reader_02",
     "preferences": {
@@ -147,6 +199,7 @@
     ],
     "signals_pending_confirmation": []
   },
+
   "reader_03": {
     "reader_id": "reader_03",
     "preferences": {
