@@ -1,5 +1,6 @@
 [
   { "id": "reader_01", "full_name": "Riddhi", "role": "reader" },
   { "id": "reader_02", "full_name": "Alex", "role": "reader" },
-  { "id": "reader_03", "full_name": "Jordan", "role": "reader" }
+  { "id": "reader_03", "full_name": "Jordan", "role": "reader" },
+  { "id": "reader_04", "full_name": "Jake", "role": "reader" }
 ]

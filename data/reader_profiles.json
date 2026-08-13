@@ -127,6 +127,17 @@
         "signals_extracted": [
           "pacing"
         ]
+      },
+      {
+        "log_id": "log_011",
+        "book_id": "OlmJEAAAQBAJ",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "too slow",
+        "timestamp": "2026-08-13T00:18:19Z",
+        "signals_extracted": [
+          "pacing"
+        ]
       }
     ],
     "signals_pending_confirmation": [
@@ -166,10 +177,44 @@
         "confidence": 0.4,
         "temporary": true,
         "timestamp": "2026-08-10T13:13:19Z"
+      },
+      {
+        "signal": "dnf_due_to_pacing",
+        "source": "log_reading_outcome",
+        "confidence": 0.5,
+        "temporary": true,
+        "timestamp": "2026-08-13T00:18:19Z"
+      },
+      {
+        "signal": "prefers_breakneck_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:19:08Z"
+      },
+      {
+        "signal": "prefers_brisk_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:40:02Z"
+      },
+      {
+        "signal": "prefers_brisk_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:40:18Z"
+      },
+      {
+        "signal": "prefers_brisk_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:46:40Z"
       }
     ]
   },
-
   "reader_02": {
     "reader_id": "reader_02",
     "preferences": {
@@ -186,20 +231,43 @@
     },
     "reading_log": [
       {
+        "log_id": "log_001",
+        "book_id": "b001",
+        "outcome": "dnf",
+        "rating": null,
+        "dnf_reason": "couldn't focus",
+        "timestamp": "2025-09-15T10:30:00Z",
+        "signals_extracted": []
+      },
+      {
         "log_id": "log_004",
         "book_id": "b004",
         "outcome": "finished",
         "rating": 5,
         "dnf_reason": null,
-        "timestamp": "2026-05-22T16:45:00Z",
+        "timestamp": "2025-05-22T16:45:00Z",
         "signals_extracted": [
           "mood"
         ]
       }
     ],
-    "signals_pending_confirmation": []
+    "signals_pending_confirmation": [
+      {
+        "signal": "prefers_breakneck_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:11:45Z"
+      },
+      {
+        "signal": "prefers_breakneck_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:17:03Z"
+      }
+    ]
   },
-
   "reader_03": {
     "reader_id": "reader_03",
     "preferences": {
@@ -251,6 +319,27 @@
         "confidence": 0.52,
         "temporary": true,
         "timestamp": "2026-07-25T08:30:00Z"
+      },
+      {
+        "signal": "prefers_brisk_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-13T00:44:18Z"
+      }
+    ]
+  },
+  "reader_04": {
+    "reader_id": "reader_04",
+    "preferences": {},
+    "reading_log": [],
+    "signals_pending_confirmation": [
+      {
+        "signal": "prefers_breakneck_pacing",
+        "source": "clarification_answer",
+        "confidence": 0.7,
+        "temporary": false,
+        "timestamp": "2026-08-12T23:34:11Z"
       }
     ]
   }

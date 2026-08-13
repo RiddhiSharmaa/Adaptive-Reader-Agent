@@ -54,9 +54,16 @@ Classify the user's message into exactly one of these categories:
   that last one, too slow", "give it a 4/5"
 
 - reading_insights: the reader is asking about their OWN reading patterns,
-  history, or preferences over time — not asking for a new recommendation.
-  Examples: "why do I keep DNFing fantasy books", "what genres do I finish
-  the most", "have my preferences changed lately"
+  history, preferences over time, or ability/habit — NOT asking for a new 
+  recommendation. Includes questions about slumps, returning to reading, 
+  understanding their own taste, or analyzing their reading history.
+  Examples: 
+    - "why do I keep DNFing fantasy books"
+    - "what genres do I finish the most"
+    - "have my preferences changed lately"
+    - "I haven't read in a year. How do I get back?"
+    - "am I in a reading slump"
+    - "why is reading feeling harder lately"
 
 - view_aggregate_reception: an author is asking about how readers are
   receiving THEIR book — never an individual reader's specific feedback.

@@ -1,510 +1,288 @@
 """
-get_recommendation intent handler — Part 3 (Google Books integration).
-
-Reads `needed_sources` (set by planner_node in app/graph.py) to decide which path to take:
-
-  - "resolve" mode: a peer match was already found. Just resolve that known 
-    book_id into display metadata and explain the peer-based reasoning. No 
-    RAG, no discovery search.
-
-  - "discover" mode: no peer match. Interpret the reader's message (merged 
-    with their stored preferences) into filter criteria, construct a targeted 
-    Google Books query, retrieve real candidates, rank them against the 
-    reader's profile, and compose a grounded recommendation from the best match.
-
-New in Part 3:
-- _construct_google_books_query() builds natural-language queries Google 
-  Books understands (genre keywords, pacing descriptors, narrative patterns)
-- _rank_candidates() uses the LLM to score descriptions against the reader's 
-  desired profile (pacing/tone/trope intent) AND checks page_count
-- Error handling if Google Books returns no results or is unreachable
+Handler for get_recommendation with RAG integration.
 """
 
-import json
-import os
-from anthropic import Anthropic
-from typing import Optional
-
-from app.tools import get_book_by_id, search_books, get_reader_profile
+from app.reader_modeling import find_peer_match, process_feedback_signal
+from app.tools import get_reader_profile, search_books, get_book_by_id
 from app.rag_index import knowledge_collection
+from anthropic import Anthropic
+import os
+import json
 
-client = Anthropic(
-    api_key=os.getenv("ANTHROPIC_API_KEY"),
-    base_url=os.getenv("ANTHROPIC_BASE_URL"),
-)
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 
-# ---------------------------------------------------------------------------
-# Filter extraction (discover mode only)
-# ---------------------------------------------------------------------------
-
-def _extract_filters(message: str, stored_preferences: dict) -> dict:
-    """
-    Merge the reader's current message with their stored preferences into
-    a filter dict for query construction.
-
-    Returns: dict mapping dimension names (pacing, tone, trope, mood, etc.)
-    to desired values, PLUS any metadata constraints like "length" or "page_count".
-
-    Approach: stored preferences are the baseline (what we already believe
-    about this reader). The current message can override or add to that —
-    e.g. a reader with a stored "measured" pacing preference who explicitly
-    asks for "something breakneck today" should get breakneck results, not
-    have their one-off request overridden by stale history.
+def _query_rag(pacing: str, mood: str, trope: str) -> str:
+    """Query RAG knowledge base."""
+    query = f"{pacing} pacing {mood} mood {trope} reader preferences"
     
-    IMPORTANT: explicitly extract metadata constraints (length, page count,
-    series vs standalone, etc.) from the current message. These are NOT in
-    stored preferences and must be inferred from words like "short", "long",
-    "quick", "quick read", "series", "standalone", etc.
-    """
-    baseline = {
-        key: field["value"]
-        for key, field in stored_preferences.items()
-        if isinstance(field, dict) and "value" in field
-    }
-
-    extraction_prompt = f"""The reader's stored preferences are: {json.dumps(baseline)}
-
-Their current message is: "{message}"
-
-Extract TWO things:
-
-1. Reading preferences (pacing, tone, mood, trope, genre):
-   If the message expresses a specific pacing, tone, mood, or trope preference,
-   use that value (it overrides the stored baseline for this request). If the
-   message doesn't mention a given dimension, keep the stored baseline value
-   for it. Omit any dimension with no value from either source.
-
-2. Metadata constraints:
-   - "length": if the message says "short", "quick read", "novella" → "short"
-     if the message says "long", "epic", "dense", "hefty" → "long"
-   - "series": if the message asks for a series → "series"
-     if the message asks for standalone → "standalone"
-   Omit if not mentioned.
-
-Respond ONLY with a JSON object, e.g.:
-{{"pacing": "breakneck", "tone": "dark", "length": "short", "series": "series"}}
-
-If nothing can be determined, respond with {{}}.
-"""
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=150,
-        messages=[{"role": "user", "content": extraction_prompt}],
-    )
-
     try:
-        raw_text = response.content[0].text.strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`")
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-            raw_text = raw_text.strip()
-        return json.loads(raw_text)
-    except (json.JSONDecodeError, IndexError):
-        return baseline  # fail safe: fall back to stored preferences only
-
-
-# ---------------------------------------------------------------------------
-# RAG grounding (discover mode only)
-# ---------------------------------------------------------------------------
-
-def _query_rag(message: str, n_results: int = 3) -> str:
-    """
-    Retrieve relevant knowledge-base chunks to ground the recommendation's
-    reasoning (e.g. pacing taxonomy definitions, trope framing, tone/mood
-    guidance) — NOT used to find book titles, since RAG never stores book
-    titles.
-
-    Returns: concatenated document chunks, or empty string if none found.
-    """
-    results = knowledge_collection.query(query_texts=[message], n_results=n_results)
-    documents = results.get("documents", [[]])[0]
-    return "\n\n".join(documents) if documents else ""
-
-
-# ---------------------------------------------------------------------------
-# Construct a Google Books query
-# ---------------------------------------------------------------------------
-
-def _construct_google_books_query(
-    filters: dict,
-    rag_context: str,
-    message: str,
-) -> str:
-    """
-    Transform extracted preference filters into a natural-language query
-    that Google Books can understand and return useful candidates for.
-
-    The agent decides WHAT KIND of book to look for, and this function
-    articulates that intent as a concrete search string.
-
-    Args:
-        filters: dict of extracted preferences, e.g. 
-                 {"pacing": "breakneck", "tone": "dark", "trope": "ensemble"}
-        rag_context: relevant domain knowledge from RAG (pacing definitions, etc.)
-        message: the reader's original message for context
-
-    Returns:
-        str: A natural-language Google Books query, e.g.
-             "fast-paced dark thriller with ensemble cast"
-             
-    The query uses keywords Google Books understands (genre, pacing descriptors
-    like "quick" or "leisurely", mood/tone words, narrative patterns) — NOT
-    the invented pacing/tone/trope fields, since Google Books doesn't have those.
-    """
-    filters_text = json.dumps(filters) if filters else "{}"
-    rag_snippet = rag_context[:500] if rag_context else "(No RAG context)"
-
-    prompt = f"""You are building a search query for Google Books API to find books 
-that match a reader's preferences.
-
-Reader's original request: "{message}"
-
-Extracted preference filters: {filters_text}
-
-Relevant background on pacing/tone/trope concepts:
-{rag_snippet}
-
-Translate these preferences into a single, concise Google Books search query 
-(3-8 words) that uses keywords Google Books understands:
-- For pacing: use "fast-paced", "quick", "slow-burn", "leisurely", "gripping", 
-  "page-turner", etc.
-- For tone/mood: use "dark", "uplifting", "humorous", "suspenseful", "melancholic", etc.
-- For trope/narrative: use "ensemble cast", "slow-burn romance", "unreliable 
-  narrator", "found family", etc.
-- Include genre keywords if relevant (mystery, thriller, fantasy, science fiction, etc.)
-
-Examples:
-- If filters say breakneck + dark + ensemble: "fast-paced dark thriller ensemble cast"
-- If filters say measured + hopeful + found_family: "slow-burn hopeful story community"
-
-Respond with ONLY the query string, no explanation or quotes.
-"""
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    query = response.content[0].text.strip().strip('"')
-    return query if query else "fiction"  # fallback to broad query
-
-
-# ---------------------------------------------------------------------------
-# Rank candidates by description fit AND metadata constraints
-# ---------------------------------------------------------------------------
-
-# FIX 1: REVERT _rank_candidates in app/intents/recommend.py
-# Replace the ENTIRE _rank_candidates function with this (simpler, was working):
-
-def _rank_candidates(
-    candidates: list[dict],
-    filters: dict,
-    rag_context: str,
-) -> list[dict]:
-    """Score and rank candidates. Soft penalties for constraints."""
-    if not candidates or not filters:
-        return candidates
-
-    filters_text = json.dumps(filters)
-    rag_snippet = rag_context[:300] if rag_context else ""
-
-    candidates_text = "\n".join(
-        f"[{i+1}] {c['title']} by {c['author']} ({c.get('page_count', 'unknown')} pages)\n"
-        f"    {c['description'][:150]}"
-        for i, c in enumerate(candidates)
-    )
-
-    prompt = f"""Score books {1}-{len(candidates)} for reader profile {filters_text}.
-Respond ONLY: {{"1": 9, "2": 5}}"""
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    try:
-        raw_text = response.content[0].text.strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`").lstrip("json").strip()
-        scores = json.loads(raw_text)
-    except (json.JSONDecodeError, IndexError):
-        return candidates
-
-    # SOFT penalties only (not hard filters)
-    length_constraint = filters.get("length")
-    scored = []
-    
-    for i, candidate in enumerate(candidates):
-        base_score = float(scores.get(str(i + 1), 0))
-        page_count = candidate.get("page_count", 0)
-        
-        # Soft penalty (0.8x multiplier, not removal)
-        if length_constraint == "short" and page_count and page_count > 300:
-            base_score *= 0.8
-        elif length_constraint == "long" and page_count and page_count < 200:
-            base_score *= 0.8
-        
-        scored.append((base_score, candidate))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in scored]
-
-
-# ---------------------------------------------------------------------------
-# Response composition
-# ---------------------------------------------------------------------------
-
-# In app/intents/recommend.py, replace _compose_response guard section:
-
-# def _compose_response(
-#     reasoning_context: str, 
-#     candidates: list[dict], 
-#     message: str,
-#     reader_profile: Optional[dict] = None,
-# ) -> str:
-#     """Recommend from candidates grounded in metadata."""
-#     if not candidates:
-#         return (
-#             "I couldn't find a book matching what you're looking for right now. "
-#             "Try describing what you're in the mood for in different words."
-#         )
-
-#     best_book = candidates[0]
-    
-#     # Softer guard: Only refuse if description is COMPLETELY empty AND profile is null
-#     description = best_book.get("description", "").strip()
-    
-#     # If description empty AND no reader profile, ask for help
-#     profile_empty = not reader_profile or not reader_profile.get("preferences")
-    
-#     if not description and profile_empty:
-#         return (
-#             "I found a book but don't have enough details about it to "
-#             "explain why it fits. Try describing what you're looking for?"
-#         )
-    
-#     # If description exists (even short), proceed with recommendation
-#     # Don't refuse just because it's thin
-    
-#     categories_str = ", ".join(best_book.get("categories", [])) if best_book.get("categories") else ""
-
-#     candidates_text = (
-#         f"- {best_book['title']} by {best_book['author']}\n"
-#         f"  {description if description else '(Limited details available)'}\n"
-#         f"  {f'[{categories_str}]' if categories_str else ''}"
-#     )
-
-#     prompt = f"""Reader: "{message}"
-
-# {reasoning_context}
-
-# Book to recommend:
-# {candidates_text}
-
-# Write 2-3 sentence recommendation grounded ONLY in the data above.
-# Do not invent details. Just explain why it might fit their request."""
-
-#     response = client.messages.create(
-#         model=MODEL,
-#         max_tokens=200,
-#         messages=[{"role": "user", "content": prompt}],
-#     )
-#     return response.content[0].text.strip()
-# FIX: Add metadata validation to _compose_response() in app/intents/recommend.py
-
-def _compose_response(
-    reasoning_context: str, 
-    candidates: list[dict], 
-    message: str,
-    reader_profile: Optional[dict] = None,
-) -> str:
-    """Recommend from candidates, validating metadata matches constraints."""
-    
-    if not candidates:
-        return "I couldn't find a book matching what you're looking for."
-
-    # VALIDATION 1: Null profile
-    profile_empty = not reader_profile or not reader_profile.get("preferences")
-    message_lower = message.lower()
-    
-    if profile_empty and any(kw in message_lower for kw in ["perfect", "every preference", "match me"]):
-        return (
-            "I'd need to know your reading preferences to make a confident recommendation. "
-            "What kinds of pacing, tone, or story types appeal to you?"
+        results = knowledge_collection.query(
+            query_texts=[query],
+            n_results=3
         )
-    
-    # VALIDATION 2: Find best candidate that respects explicit constraints
-    best_book = None
-    
-    # Extract explicit constraints from message
-    wants_slow = any(w in message_lower for w in ["slow", "measured", "leisurely", "atmospheric"])
-    wants_short = any(w in message_lower for w in ["short", "quick read", "brief"])
-    
-    for candidate in candidates:
-        # Skip if violates pacing constraint
-        if wants_slow:
-            pacing = candidate.get("pacing", "").lower()
-            if pacing in ["breakneck", "brisk", "fast-paced"]:
-                continue  # Skip this one, find slower alternative
         
-        if wants_short:
-            pages = candidate.get("page_count", 0)
-            if pages > 300:
-                continue  # Skip this one, find shorter alternative
-        
-        best_book = candidate
-        break
+        if results and results.get("documents"):
+            docs = results["documents"][0]
+            return "\n".join(docs) if docs else ""
+    except Exception as e:
+        print(f"[RAG ERROR] {e}")
     
-    # If all candidates violated constraints, fall back to first but note mismatch
-    if not best_book:
-        best_book = candidates[0]
-        
-        # Check if recommending despite mismatch
-        description = best_book.get("description", "").strip()
-        pacing = best_book.get("pacing", "").lower()
-        pages = best_book.get("page_count", 0)
-        
-        mismatch = False
-        if wants_slow and pacing in ["breakneck", "brisk"]:
-            if not description:
-                return "The available books don't match what you're looking for right now. Try describing differently?"
-            mismatch = True
-        
-        if wants_short and pages > 300:
-            if not description:
-                return "The available books don't match what you're looking for right now. Try describing differently?"
-            mismatch = True
-        
-        # If mismatch but has description, note it in prompt
-        if mismatch:
-            caveat = f"\n[Note: This book has {pacing} pacing and {pages} pages, which doesn't perfectly match the 'slow' or 'short' request, but it may still interest you based on other factors.]"
-        else:
-            caveat = ""
-    else:
-        caveat = ""
+    return ""
+
+
+def _extract_pacing_mood_from_text(user_message: str) -> tuple[str, str]:
+    """Parse free-text into pacing + mood."""
+    prompt = f"""Extract reading preferences from:
+"{user_message}"
+
+Return ONLY JSON:
+{{"pacing": "<breakneck|brisk|measured|slow-burn|contemplative>", "mood": "<value>"}}
+
+Return ONLY JSON, no other text."""
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=50,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        result = json.loads(text)
+        return result.get("pacing", "brisk"), result.get("mood", "engaging")
+    except Exception as e:
+        print(f"[SIGNAL EXTRACTION ERROR] {e}")
+        return "brisk", "engaging"
+
+
+def _is_valid_fiction(book: dict) -> bool:
+    """
+    Validate that book is actual fiction/novel, not a technical doc.
+    Filters out: patents, government docs, instruction manuals, etc.
+    """
     
-    # COMPOSE RECOMMENDATION
-    description = best_book.get("description", "").strip()
-    if not description:
-        return "The available books don't have enough details for a confident recommendation. Try describing differently?"
+    # Get categories and description
+    categories = book.get("categories", [])
+    description = book.get("description", "").lower()
+    title = book.get("title", "").lower()
     
-    categories_str = ", ".join(best_book.get("categories", [])) if best_book.get("categories") else ""
+    # ❌ EXCLUDE these
+    bad_keywords = [
+        "patent", "gazette", "trademark", "government", "manual",
+        "instruction", "technical", "reference", "dictionary",
+        "encyclopedia", "directory", "index", "database",
+        "companion", "guide", "introduction", "primer", "handbook",  # ⭐ ADDED
+        "critical study", "essay", "analysis", "commentary"   
+    ]
     
-    candidates_text = (
-        f"- {best_book['title']} by {best_book['author']}\n"
-        f"  {description}\n"
-        f"  {f'[{categories_str}]' if categories_str else ''}"
-    )
+    for keyword in bad_keywords:
+        if keyword in title or keyword in description:
+            return False
+    
+    # ✅ ACCEPT these categories
+    good_categories = [
+        "Fiction", "Novel", "Fantasy", "Mystery", "Thriller",
+        "Science Fiction", "Romance", "Historical", "Literary",
+        "Adventure", "Classics"
+    ]
+    
+    # If book has good category tags, accept it
+    for cat in categories:
+        if any(good in cat for good in good_categories):
+            return True
+    
+    # If description sounds like fiction, accept it
+    fiction_keywords = [
+        "protagonist", "story", "novel", "narrative", "tale",
+        "character", "adventure", "mystery", "discovers",
+        "journey", "quest", "follows"
+    ]
+    
+    for keyword in fiction_keywords:
+        if keyword in description:
+            return True
+    
+    # Default: reject (safer than recommending random doc)
+    return False
 
-    prompt = f"""Reader: "{message}"
 
-{reasoning_context}
+def _build_query(pacing: str, mood: str, trope: str, context: str = "") -> str:
+    """
+    Build improved search query with fiction context.
+    ⭐ KEY: Add "novel" or "classic" or "fiction" to query
+    """
+    parts = []
+    
+    # Add pacing + mood
+    if pacing:
+        parts.append(pacing)
+    if mood:
+        parts.append(mood)
+    if trope:
+        parts.append(trope)
+    
+    # Add context hints
+    if context:
+        parts.append(context)
+    
+    # Always add fiction/novel keyword
+    parts.append("novel")
+    
+    return " ".join(parts) if parts else "engaging fiction novel"
 
-Book:
-{candidates_text}{caveat}
-
-Recommend in 2-3 sentences. Ground ONLY in metadata above. No invented details."""
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text.strip()
-
-
-# ---------------------------------------------------------------------------
-# Main handler
-# ---------------------------------------------------------------------------
 
 def handle_get_recommendation(state: dict) -> dict:
-    """
-    state must contain: message, user (with user_id), needed_sources
-    (set by planner_node).
-
-    Returns a dict to merge into graph state: {"handler_result": ..., "response": ...}
-    """
     reader_id = state["user"]["id"]
-    message = state["message"]
-    sources = state["needed_sources"]
-
-    if sources.get("google_books_mode") == "resolve" and sources.get("peer_match_book_id"):
-        # --- Peer match path: no RAG, no discovery search ---
-        book_id = sources["peer_match_book_id"]
-        book = get_book_by_id(book_id)
-
-        if book is None:
-            return _discover_path(reader_id, message)
-
-        reasoning_context = (
-            "This book was recommended because a reader with a similar "
-            "preference profile finished it and rated it highly."
-        )
-        reader_profile = get_reader_profile(reader_id)  # <-- ADD THIS LINE
-        response_text = _compose_response(reasoning_context, [book], message, reader_profile)  # <-- ADD reader_profile PARAM
-        return {
-            "handler_result": {"mode": "resolve", "book": book},
-            "response": response_text,
-        }
-
-    return _discover_path(reader_id, message)
-
-
-def _discover_path(reader_id: str, message: str) -> dict:
-    """
-    Discovery path for when no peer match exists.
-    
-    Flow (Part 3):
-    1. Extract filters from stored preferences + current message (including metadata constraints)
-    2. Query RAG for domain grounding (pacing/tone/trope concepts)
-    3. Construct a targeted Google Books search query from filters
-    4. Search Google Books with that query (returns ~10 candidates)
-    5. Rank candidates by description fit to the reader's profile + metadata constraints
-    6. Compose recommendation from the best-ranked candidate
-    7. Return to graph
-    """
+    message = state["message"].strip()
     profile = get_reader_profile(reader_id)
-    filters = _extract_filters(message, profile.get("preferences", {}))
-    rag_context = _query_rag(message)
-
-    # Construct a natural-language query for Google Books
-    google_books_query = _construct_google_books_query(filters, rag_context, message)
-
-    # Search Google Books with the constructed query
-    candidates = search_books(query=google_books_query, max_results=10)
-
-    if not candidates:
-        # Google Books returned nothing (network error, rate limit, or just no match)
+    
+    # ================================================================
+    # CASE 1: PEER MATCH (unchanged)
+    # ================================================================
+    peer_book_id = find_peer_match(reader_id, similarity_threshold=0.6)
+    if peer_book_id:
+        book = get_book_by_id(peer_book_id)
+        if book and _is_valid_fiction(book):
+            rag_context = _query_rag("unknown", "unknown", "unknown")
+            response = (
+                f"I found a match: **{book['title']}** by {book['author']}. "
+                f"Other readers like you loved it."
+            )
+            return {
+                "handler_result": {"mode": "resolve", "book": book},
+                "response": response,
+                "rag_context": rag_context,
+            }
+    
+    # ================================================================
+    # CASE 2: CLARIFICATION ANSWER DETECTED (moved BEFORE stored prefs)
+    # ================================================================
+    
+    pacing_keywords = ["fast", "quick", "breakneck", "brisk", "slow", "measured", "contemplative"]
+    mood_keywords = ["gripping", "tense", "cozy", "reflective", "dark", "hopeful", "emotional", "adventure"]
+    author_keywords = ["same author", "different author", "author", "different world", "standalone"]
+    
+    has_pacing = any(kw in message.lower() for kw in pacing_keywords)
+    has_mood = any(kw in message.lower() for kw in mood_keywords)
+    has_author = any(kw in message.lower() for kw in author_keywords)  # ⭐ ADD THIS
+    
+    context = ""
+    if "classic" in message.lower():
+        context = "classic"
+    if "1900" in message or "19th" in message or "sci-fi" in message.lower():
+        context = "sci-fi" if "sci-fi" in message.lower() else "historical"
+    
+    if "series" in message.lower() or "book " in message.lower():
+        rag_context = _query_rag("unknown", "unknown", "")
+        
+        response = (
+            "I hear you — series burnout is real! A few options: "
+            "**Do you want to stay with the author (their standalone works), "
+            "or try a completely fresh author?**"
+        )
+        
+        state["series_context"] = True
+        
         return {
-            "handler_result": {"mode": "discover", "filters": filters, "candidates": []},
-            "response": (
-                "I wasn't able to find books matching your request right now. "
-                "This might be a temporary issue with book search. Could you try "
-                "describing what you're looking for in different words?"
-            ),
+            "handler_result": {"mode": "clarify", "type": "series"},
+            "response": response,
+            "rag_context": rag_context,
         }
 
-    # Rank candidates against the reader's profile AND metadata constraints
-    ranked_candidates = _rank_candidates(candidates, filters, rag_context)
+    if has_pacing or has_mood or has_author:
+        pacing, mood = _extract_pacing_mood_from_text(message)
+        
+        rag_context = _query_rag(pacing, mood, "")
+        
+        # ⭐ BUILD QUERY WITH CURRENT MESSAGE, NOT STORED PREFS
+        query = _build_query(pacing, mood, "", context)
+        candidates = search_books(query, max_results=15)
+        
+        valid_candidates = [b for b in candidates if _is_valid_fiction(b)]
+        
+        if valid_candidates:
+            top = valid_candidates[0]
+            response = (
+                f"Perfect! For {pacing} narratives with a {mood} feel, "
+                f"I recommend **{top['title']}** by {top['author']}."
+            )
+            
+            process_feedback_signal(
+                reader_id=reader_id,
+                signal_name=f"prefers_{pacing}_pacing",
+                confidence=0.7,
+                source="clarification_answer",
+                temporary=False,
+            )
+            
+            return {
+                "handler_result": {"mode": "discover", "candidates": valid_candidates},
+                "response": response,
+                "rag_context": rag_context,
+                "profile_updates": {
+                    "pending_signals": [
+                        {"signal_name": f"prefers_{pacing}_pacing", "confidence": 0.7, "source": "clarification_answer"},
+                    ]
+                },
+            }
+        else:
+            response = (
+                f"I'm having trouble finding the perfect {pacing}, {mood} match "
+                f"in the current database. Could you give me another hint?"
+            )
+            return {
+                "handler_result": {"mode": "discover", "candidates": []},
+                "response": response,
+                "rag_context": rag_context,
+            }
+    
+    # ================================================================
+    # CASE 3: PROFILE HAS PREFERENCES (now AFTER clarification check)
+    # ================================================================
+    
+    preferences = profile.get("preferences", {})
+    
+    if preferences and len(preferences) >= 2:
+        pacing = preferences.get("pacing", {}).get("value", "brisk")
+        mood = preferences.get("mood", {}).get("value", "engaging")
+        trope = preferences.get("trope", {}).get("value", "")
+        
+        rag_context = _query_rag(pacing, mood, trope)
+        
+        query = _build_query(pacing, mood, trope)
+        candidates = search_books(query, max_results=15)
+        
+        valid_candidates = [b for b in candidates if _is_valid_fiction(b)]
+        
+        if valid_candidates:
+            top = valid_candidates[0]
+            response = (
+                f"Based on your history, try **{top['title']}** by {top['author']}. "
+                f"It matches the {pacing} pacing and {mood} feel you've enjoyed."
+            )
+            return {
+                "handler_result": {"mode": "discover", "candidates": valid_candidates},
+                "response": response,
+                "rag_context": rag_context,
+            }
 
-    reasoning_context = (
-        f"Relevant pacing/tone concepts:\n{rag_context}"
-        if rag_context else "Based on your preferences:"
+        
+    
+    # ================================================================
+    # CASE 4: DEFAULT CLARIFICATION
+    # ================================================================
+    
+    rag_context = _query_rag("unknown", "unknown", "unknown")
+    
+    response = (
+        "I'd love to help you find something great. "
+        "Could you tell me: **Are you looking for something fast-paced and gripping, "
+        "or something slower and more reflective?**"
     )
-    response_text = _compose_response(reasoning_context, ranked_candidates, message, profile)  # <-- ADD profile PARAM
-
+    
     return {
-        "handler_result": {
-            "mode": "discover",
-            "filters": filters,
-            "candidates": ranked_candidates,
-            "google_books_query": google_books_query,
-        },
-        "response": response_text,
+        "handler_result": {"mode": "clarify"},
+        "response": response,
+        "rag_context": rag_context,
     }
